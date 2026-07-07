@@ -85,8 +85,9 @@ async function processSermon(itemId: string) {
     : generated.mimeType.includes("webp")
       ? "webp"
       : "jpg";
-  const slug = item.fieldData.slug || itemId;
-  const asset = await uploadAsset(`${slug}-vertical.${ext}`, generated.data, generated.mimeType);
+  // Webflow rejects long asset file names, so cap the slug-based base.
+  const base = (item.fieldData.slug || itemId).slice(0, 60);
+  const asset = await uploadAsset(`${base}-vertical.${ext}`, generated.data, generated.mimeType);
 
   // 4. Write the field and publish.
   const alt = item.fieldData.name ? `${item.fieldData.name} — vertical thumbnail` : null;
