@@ -24,7 +24,10 @@ export const REPOSITION_PROMPT =
   "the upper portion of the image; refrain from putting text on the bottom " +
   "half. The only content you may remove is the verse reference and the " +
   "subtitle. Order of priority for what to keep: pastor picture, title, " +
-  "subtitle, verse reference.";
+  "subtitle, verse reference. " +
+  "Show the person exactly once — never duplicate, clone, mirror, or repeat " +
+  "the person, the pulpit, or any element to fill space. Fill the lower area " +
+  "only with a natural continuation of the existing background scene.";
 
 function geminiKey(): string {
   const key =
