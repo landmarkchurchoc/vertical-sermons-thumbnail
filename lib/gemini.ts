@@ -5,6 +5,8 @@
 //
 // Requires a Google AI Studio API key. We accept the common env-var names so it
 // works regardless of which one was set in Vercel.
+import sharp from "sharp";
+
 const MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
 
 // Prompt for reflowing a 16:9 sermon graphic into a 2:3 vertical thumbnail.
@@ -102,4 +104,58 @@ export async function repositionTo2x3(input: ImageData): Promise<ImageData> {
   throw new Error(
     `Gemini returned no image (finishReason: ${json.candidates?.[0]?.finishReason ?? "unknown"}).`
   );
+}
+
+// Mean brightness (0-255) of the bottom ~28% of the image. Nano Banana
+// sometimes letterboxes the 16:9 content into the top and leaves the bottom
+// near-black; a low value here is our signal that the frame wasn't filled.
+async function bottomBandBrightness(data: Buffer): Promise<number> {
+  const meta = await sharp(data).metadata();
+  const h = meta.height ?? 0;
+  const w = meta.width ?? 0;
+  if (!h || !w) return 255; // can't measure — assume fine
+  const top = Math.floor(h * 0.72);
+  const band = await sharp(data)
+    .extract({ left: 0, top, width: w, height: h - top })
+    .greyscale()
+    .raw()
+    .toBuffer();
+  let sum = 0;
+  for (const px of band) sum += px;
+  return sum / band.length;
+}
+
+// Below this mean brightness the bottom band reads as empty/letterboxed.
+// Measured separation on real sermons: filled bottoms score >40, empty ones <30.
+const MIN_BOTTOM_BRIGHTNESS = 35;
+
+/**
+ * Reposition to 2:3 and guard against letterboxing: if the generated image has
+ * a near-empty (black) bottom band, regenerate — the model is stochastic and
+ * usually fills the frame on another attempt. Returns the best of up to
+ * `attempts` tries (the one with the brightest bottom band).
+ */
+export async function repositionTo2x3Filled(
+  input: ImageData,
+  attempts = 3
+): Promise<ImageData & { attempts: number; bottomBrightness: number }> {
+  let best: ImageData | null = null;
+  let bestBrightness = -1;
+  let used = 0;
+  for (let i = 0; i < attempts; i++) {
+    used = i + 1;
+    const out = await repositionTo2x3(input);
+    let brightness: number;
+    try {
+      brightness = await bottomBandBrightness(out.data);
+    } catch {
+      brightness = 255; // measurement failed — accept this result
+    }
+    if (brightness > bestBrightness) {
+      best = out;
+      bestBrightness = brightness;
+    }
+    if (brightness >= MIN_BOTTOM_BRIGHTNESS) break; // good fill — stop early
+  }
+  return { ...(best as ImageData), attempts: used, bottomBrightness: Math.round(bestBrightness) };
 }

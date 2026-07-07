@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { repositionTo2x3 } from "@/lib/gemini";
+import { repositionTo2x3Filled } from "@/lib/gemini";
 import {
   SERMONS_COLLECTION_ID,
   getSermon,
@@ -76,8 +76,8 @@ async function processSermon(itemId: string) {
   const srcBuf = Buffer.from(await srcRes.arrayBuffer());
   const srcMime = srcRes.headers.get("content-type")?.split(";")[0] || "image/jpeg";
 
-  // 2. Reposition to 2:3 with Nano Banana.
-  const generated = await repositionTo2x3({ data: srcBuf, mimeType: srcMime });
+  // 2. Reposition to 2:3 with Nano Banana (retries if the bottom comes out empty).
+  const generated = await repositionTo2x3Filled({ data: srcBuf, mimeType: srcMime });
 
   // 3. Upload the generated image to the Webflow asset library.
   const ext = generated.mimeType.includes("png")
@@ -103,7 +103,15 @@ async function processSermon(itemId: string) {
     console.warn("sermon-thumbnail: field saved but publish failed:", err);
   }
 
-  return { ok: true, itemId, assetId: asset.id, assetUrl: asset.hostedUrl, published };
+  return {
+    ok: true,
+    itemId,
+    assetId: asset.id,
+    assetUrl: asset.hostedUrl,
+    published,
+    attempts: generated.attempts,
+    bottomBrightness: generated.bottomBrightness,
+  };
 }
 
 // Simple health check for wiring up the webhook URL.
