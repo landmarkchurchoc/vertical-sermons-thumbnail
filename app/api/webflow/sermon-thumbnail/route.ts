@@ -47,8 +47,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ skipped: "not a sermons item" });
   }
 
+  // ?force=1 regenerates even if a vertical thumbnail already exists (used to
+  // overwrite earlier low-quality renders; not set by Webflow's own webhooks).
+  const force = ["1", "true", "yes"].includes((req.nextUrl.searchParams.get("force") || "").toLowerCase());
+
   try {
-    const result = await processSermon(itemId);
+    const result = await processSermon(itemId, force);
     return NextResponse.json(result);
   } catch (err) {
     console.error("sermon-thumbnail error:", err);
@@ -57,11 +61,12 @@ export async function POST(req: NextRequest) {
   }
 }
 
-async function processSermon(itemId: string) {
+async function processSermon(itemId: string, force = false) {
   const item = await getSermon(itemId);
 
   // Already done — don't regenerate or re-publish (avoids self-trigger loops).
-  if (hasVerticalThumbnail(item)) {
+  // `force` overrides this to overwrite an existing thumbnail on demand.
+  if (!force && hasVerticalThumbnail(item)) {
     return { skipped: "vertical-thumbnail already set", itemId };
   }
 
