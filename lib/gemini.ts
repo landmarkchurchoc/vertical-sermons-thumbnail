@@ -7,15 +7,22 @@
 // works regardless of which one was set in Vercel.
 const MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
 
-// The exact prompt Landmark verified as "working" for this reposition task.
+// Prompt for reflowing a 16:9 sermon graphic into a 2:3 vertical thumbnail.
+// The emphasis on filling the entire frame is deliberate: a looser prompt makes
+// the model letterbox the 16:9 content into the top and leave the bottom black.
 export const REPOSITION_PROMPT =
-  "Keep all the content the same. Do not change content or imagery. Do not " +
-  "visually change the person in the image at all. Your job is to simply " +
-  "reposition the content so that it is in a 2:3 view. The only " +
-  "content/imagery/info that you are able to remove is the verse reference and " +
-  "subtitle. Here is the order of priority as far as content goes: Pastor " +
-  "picture, Title, sub title, verse ref. Refrain from putting any text on the " +
-  "bottom half of the image.";
+  "Transform this 16:9 sermon graphic into a 2:3 vertical (portrait) image. " +
+  "Do not change content or imagery, and do not visually change the person in " +
+  "the image at all — keep their face, body, and clothing exactly the same. " +
+  "CRITICAL: fill the ENTIRE 2:3 frame edge to edge. Naturally extend the " +
+  "pastor and the background scene downward so there is NO empty, black, blank, " +
+  "or letterboxed area anywhere, especially across the bottom. You may enlarge " +
+  "the pastor and let the figure extend into the lower portion of the frame so " +
+  "the composition looks intentional and full. Keep the title and any text in " +
+  "the upper portion of the image; refrain from putting text on the bottom " +
+  "half. The only content you may remove is the verse reference and the " +
+  "subtitle. Order of priority for what to keep: pastor picture, title, " +
+  "subtitle, verse reference.";
 
 function geminiKey(): string {
   const key =
