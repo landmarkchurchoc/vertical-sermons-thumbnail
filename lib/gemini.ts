@@ -6,39 +6,33 @@
 // Requires a Google AI Studio API key. We accept the common env-var names so it
 // works regardless of which one was set in Vercel.
 import sharp from "sharp";
-import { REFERENCE_2X3_B64, REFERENCE_2X3_MIME } from "./reference-image";
 
 const MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
 
 // Prompt for reflowing a 16:9 sermon graphic into a 2:3 vertical thumbnail.
-// Two images are sent: a fixed STYLE REFERENCE (the "Broken for Battle" gold
-// standard) and the SOURCE to reformat. The heavy anti-duplication language is
-// deliberate — without it the model tiles/stacks the layout twice to fill 2:3.
+// The heavy anti-duplication language is deliberate — without it the model
+// sometimes tiles/stacks the layout twice to fill the taller 2:3 frame.
 export const REPOSITION_PROMPT =
-  "You are reformatting a 16:9 church sermon graphic into a SINGLE, cohesive " +
-  "2:3 vertical (portrait) thumbnail.\n\n" +
-  "The FIRST image is a STYLE REFERENCE showing the target vertical layout: " +
-  "one subject, a large headline in the upper area, a small speaker/label, and " +
-  "a full-bleed background that fills the entire frame. Match this composition " +
-  "and balance — but DO NOT copy its content, person, colors, or words.\n\n" +
-  "The SECOND image is the SOURCE. Use ONLY its content: its person, its title " +
-  "text, its colors, and its background imagery.\n\n" +
+  "Reformat this 16:9 church sermon graphic into a SINGLE, cohesive 2:3 " +
+  "vertical (portrait) thumbnail. Keep it faithful to THIS image only.\n\n" +
   "Absolute rules:\n" +
   "1. Produce ONE unified poster. NEVER tile, stack, mirror, split, repeat, or " +
-  "duplicate any element. The person must appear EXACTLY ONCE. Each word of the " +
-  "title must appear EXACTLY ONCE.\n" +
-  "2. Do not visually change the person — keep their face, body, and clothing " +
-  "identical to the source.\n" +
-  "3. Keep the title text complete and legible exactly as written in the " +
-  "source. Never crop, cut off, abbreviate, or garble words.\n" +
-  "4. Fill the ENTIRE 2:3 frame edge to edge by naturally extending the " +
-  "source's own background. No empty, black, or letterboxed bars anywhere.\n" +
+  "duplicate any element. The person appears EXACTLY ONCE. Each word of the " +
+  "title appears EXACTLY ONCE.\n" +
+  "2. Do not change the person at all — keep the SAME person with their face, " +
+  "body, hair, and clothing identical to the source. Never swap in or invent a " +
+  "different person.\n" +
+  "3. Keep the title text complete and legible, spelled exactly as in the " +
+  "source. Never crop, cut off, abbreviate, misspell, or garble words.\n" +
+  "4. Keep the source's own colors, background imagery, and visual style. " +
+  "Extend that background naturally to fill the ENTIRE 2:3 frame edge to edge — " +
+  "no empty, black, or letterboxed bars anywhere.\n" +
   "5. Place the title in the upper portion and the person in the lower/center; " +
   "keep text off the very bottom.\n" +
-  "6. You may remove the verse reference and the subtitle. Priority for what " +
-  "to keep: person, title, subtitle, verse reference.\n\n" +
-  "The final image should read like one professionally designed vertical movie " +
-  "poster: one subject, one headline, full-bleed background, nothing repeated.";
+  "6. You may remove only the verse reference and the subtitle. Priority to " +
+  "keep: person, title, subtitle, verse reference.\n\n" +
+  "The result should read like one professionally designed vertical poster: " +
+  "one subject, one headline, full-bleed background, nothing repeated.";
 
 function geminiKey(): string {
   const key =
@@ -75,9 +69,6 @@ export async function repositionTo2x3(input: ImageData): Promise<ImageData> {
         role: "user",
         parts: [
           { text: REPOSITION_PROMPT },
-          { text: "FIRST image — STYLE REFERENCE (layout only, do not copy its content):" },
-          { inline_data: { mime_type: REFERENCE_2X3_MIME, data: REFERENCE_2X3_B64 } },
-          { text: "SECOND image — SOURCE (reformat THIS content into the 2:3 layout):" },
           { inline_data: { mime_type: input.mimeType, data: input.data.toString("base64") } },
         ],
       },
@@ -146,33 +137,63 @@ async function bottomBandBrightness(data: Buffer): Promise<number> {
 // Measured separation on real sermons: filled bottoms score >40, empty ones <30.
 const MIN_BOTTOM_BRIGHTNESS = 35;
 
+// Mean per-pixel difference between the top and bottom halves. When the model
+// tiles/stacks the layout twice, the halves are near-identical and this is very
+// low; a normal poster (headline on top, person below) scores much higher.
+async function topBottomDiff(data: Buffer): Promise<number> {
+  const meta = await sharp(data).metadata();
+  const h = meta.height ?? 0;
+  const w = meta.width ?? 0;
+  if (!h || !w) return 255;
+  const half = Math.floor(h / 2);
+  const opts = { width: 48, height: 48, fit: "fill" as const };
+  const top = await sharp(data).extract({ left: 0, top: 0, width: w, height: half }).resize(opts).greyscale().raw().toBuffer();
+  const bot = await sharp(data).extract({ left: 0, top: h - half, width: w, height: half }).resize(opts).greyscale().raw().toBuffer();
+  let diff = 0;
+  for (let i = 0; i < top.length; i++) diff += Math.abs(top[i] - bot[i]);
+  return diff / top.length;
+}
+
+// Below this top/bottom difference the image is almost certainly tiled.
+const MIN_TOP_BOTTOM_DIFF = 15;
+
 /**
- * Reposition to 2:3 and guard against letterboxing: if the generated image has
- * a near-empty (black) bottom band, regenerate — the model is stochastic and
- * usually fills the frame on another attempt. Returns the best of up to
- * `attempts` tries (the one with the brightest bottom band).
+ * Reposition to 2:3 and guard against the two common Nano Banana failures:
+ * letterboxing (empty/black bottom) and tiling (the layout stacked twice).
+ * Regenerates up to `attempts` times and returns the best result — one that is
+ * both not tiled and has a filled bottom, else the closest available.
  */
 export async function repositionTo2x3Filled(
   input: ImageData,
   attempts = 3
-): Promise<ImageData & { attempts: number; bottomBrightness: number }> {
-  let best: ImageData | null = null;
-  let bestBrightness = -1;
+): Promise<ImageData & { attempts: number; bottomBrightness: number; topBottomDiff: number }> {
+  let best: (ImageData & { brightness: number; diff: number }) | null = null;
   let used = 0;
   for (let i = 0; i < attempts; i++) {
     used = i + 1;
     const out = await repositionTo2x3(input);
-    let brightness: number;
+    let brightness = 255;
+    let diff = 255;
     try {
       brightness = await bottomBandBrightness(out.data);
+      diff = await topBottomDiff(out.data);
     } catch {
-      brightness = 255; // measurement failed — accept this result
+      // measurement failed — treat as acceptable
     }
-    if (brightness > bestBrightness) {
-      best = out;
-      bestBrightness = brightness;
-    }
-    if (brightness >= MIN_BOTTOM_BRIGHTNESS) break; // good fill — stop early
+    const tiled = diff < MIN_TOP_BOTTOM_DIFF;
+    const filled = brightness >= MIN_BOTTOM_BRIGHTNESS;
+    // Score: never prefer a tiled result; among the rest, prefer brighter.
+    const score = (tiled ? -1000 : 0) + brightness;
+    const bestScore = best ? (best.diff < MIN_TOP_BOTTOM_DIFF ? -1000 : 0) + best.brightness : -Infinity;
+    if (score > bestScore) best = { ...out, brightness, diff };
+    if (!tiled && filled) break; // clean fill — stop early
   }
-  return { ...(best as ImageData), attempts: used, bottomBrightness: Math.round(bestBrightness) };
+  const b = best as ImageData & { brightness: number; diff: number };
+  return {
+    data: b.data,
+    mimeType: b.mimeType,
+    attempts: used,
+    bottomBrightness: Math.round(b.brightness),
+    topBottomDiff: Math.round(b.diff),
+  };
 }

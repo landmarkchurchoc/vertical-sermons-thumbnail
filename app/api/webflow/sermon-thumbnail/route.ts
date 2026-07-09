@@ -116,6 +116,7 @@ async function processSermon(itemId: string, force = false) {
     published,
     attempts: generated.attempts,
     bottomBrightness: generated.bottomBrightness,
+    topBottomDiff: generated.topBottomDiff,
   };
 }
 
