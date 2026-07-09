@@ -6,28 +6,39 @@
 // Requires a Google AI Studio API key. We accept the common env-var names so it
 // works regardless of which one was set in Vercel.
 import sharp from "sharp";
+import { REFERENCE_2X3_B64, REFERENCE_2X3_MIME } from "./reference-image";
 
 const MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
 
 // Prompt for reflowing a 16:9 sermon graphic into a 2:3 vertical thumbnail.
-// The emphasis on filling the entire frame is deliberate: a looser prompt makes
-// the model letterbox the 16:9 content into the top and leave the bottom black.
+// Two images are sent: a fixed STYLE REFERENCE (the "Broken for Battle" gold
+// standard) and the SOURCE to reformat. The heavy anti-duplication language is
+// deliberate — without it the model tiles/stacks the layout twice to fill 2:3.
 export const REPOSITION_PROMPT =
-  "Transform this 16:9 sermon graphic into a 2:3 vertical (portrait) image. " +
-  "Do not change content or imagery, and do not visually change the person in " +
-  "the image at all — keep their face, body, and clothing exactly the same. " +
-  "CRITICAL: fill the ENTIRE 2:3 frame edge to edge. Naturally extend the " +
-  "pastor and the background scene downward so there is NO empty, black, blank, " +
-  "or letterboxed area anywhere, especially across the bottom. You may enlarge " +
-  "the pastor and let the figure extend into the lower portion of the frame so " +
-  "the composition looks intentional and full. Keep the title and any text in " +
-  "the upper portion of the image; refrain from putting text on the bottom " +
-  "half. The only content you may remove is the verse reference and the " +
-  "subtitle. Order of priority for what to keep: pastor picture, title, " +
-  "subtitle, verse reference. " +
-  "Show the person exactly once — never duplicate, clone, mirror, or repeat " +
-  "the person, the pulpit, or any element to fill space. Fill the lower area " +
-  "only with a natural continuation of the existing background scene.";
+  "You are reformatting a 16:9 church sermon graphic into a SINGLE, cohesive " +
+  "2:3 vertical (portrait) thumbnail.\n\n" +
+  "The FIRST image is a STYLE REFERENCE showing the target vertical layout: " +
+  "one subject, a large headline in the upper area, a small speaker/label, and " +
+  "a full-bleed background that fills the entire frame. Match this composition " +
+  "and balance — but DO NOT copy its content, person, colors, or words.\n\n" +
+  "The SECOND image is the SOURCE. Use ONLY its content: its person, its title " +
+  "text, its colors, and its background imagery.\n\n" +
+  "Absolute rules:\n" +
+  "1. Produce ONE unified poster. NEVER tile, stack, mirror, split, repeat, or " +
+  "duplicate any element. The person must appear EXACTLY ONCE. Each word of the " +
+  "title must appear EXACTLY ONCE.\n" +
+  "2. Do not visually change the person — keep their face, body, and clothing " +
+  "identical to the source.\n" +
+  "3. Keep the title text complete and legible exactly as written in the " +
+  "source. Never crop, cut off, abbreviate, or garble words.\n" +
+  "4. Fill the ENTIRE 2:3 frame edge to edge by naturally extending the " +
+  "source's own background. No empty, black, or letterboxed bars anywhere.\n" +
+  "5. Place the title in the upper portion and the person in the lower/center; " +
+  "keep text off the very bottom.\n" +
+  "6. You may remove the verse reference and the subtitle. Priority for what " +
+  "to keep: person, title, subtitle, verse reference.\n\n" +
+  "The final image should read like one professionally designed vertical movie " +
+  "poster: one subject, one headline, full-bleed background, nothing repeated.";
 
 function geminiKey(): string {
   const key =
@@ -64,6 +75,9 @@ export async function repositionTo2x3(input: ImageData): Promise<ImageData> {
         role: "user",
         parts: [
           { text: REPOSITION_PROMPT },
+          { text: "FIRST image — STYLE REFERENCE (layout only, do not copy its content):" },
+          { inline_data: { mime_type: REFERENCE_2X3_MIME, data: REFERENCE_2X3_B64 } },
+          { text: "SECOND image — SOURCE (reformat THIS content into the 2:3 layout):" },
           { inline_data: { mime_type: input.mimeType, data: input.data.toString("base64") } },
         ],
       },
