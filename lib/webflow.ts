@@ -17,6 +17,11 @@ export const SERMONS_COLLECTION_ID =
 const THUMBNAIL_FIELD = "thumbnail";
 const VERTICAL_THUMBNAIL_FIELD = "vertical-thumbnail";
 
+// Auto-generated verticals are placed in this Asset Manager folder to keep the
+// top level of the panel clean. Set WEBFLOW_ASSET_FOLDER="" to disable foldering.
+const ASSET_FOLDER_NAME =
+  process.env.WEBFLOW_ASSET_FOLDER ?? "Sermon Vertical Thumbnails (auto)";
+
 function token(): string {
   const t = process.env.WEBFLOW_API_TOKEN;
   if (!t) throw new Error("Missing WEBFLOW_API_TOKEN.");
@@ -85,16 +90,63 @@ interface CreateAssetResponse {
   uploadDetails: Record<string, string>;
 }
 
+interface AssetFolder {
+  id: string;
+  displayName?: string;
+}
+
+// Cache the resolved folder id across warm invocations so we don't re-list on
+// every webhook. `undefined` = not resolved yet; `null` = foldering disabled or
+// unavailable (proceed without a folder).
+let cachedFolderId: string | null | undefined;
+
+/**
+ * Find (or create) the Asset Manager folder that auto-generated verticals live
+ * in, and return its id. Returns null if foldering is disabled or the folder
+ * can't be resolved — callers should treat that as "upload without a folder"
+ * rather than failing the run.
+ */
+export async function ensureAssetFolder(): Promise<string | null> {
+  if (!ASSET_FOLDER_NAME) return null;
+  if (cachedFolderId !== undefined) return cachedFolderId;
+  try {
+    const list = await wf<{ assetFolders?: AssetFolder[]; folders?: AssetFolder[] }>(
+      `/sites/${SITE_ID}/asset_folders`
+    );
+    const folders = list.assetFolders ?? list.folders ?? [];
+    const existing = folders.find(
+      (f) => (f.displayName || "").trim().toLowerCase() === ASSET_FOLDER_NAME.trim().toLowerCase()
+    );
+    if (existing?.id) return (cachedFolderId = existing.id);
+
+    const created = await wf<AssetFolder>(`/sites/${SITE_ID}/asset_folders`, {
+      method: "POST",
+      body: JSON.stringify({ displayName: ASSET_FOLDER_NAME }),
+    });
+    return (cachedFolderId = created.id ?? null);
+  } catch (err) {
+    console.warn("ensureAssetFolder: proceeding without a folder:", err);
+    return (cachedFolderId = null);
+  }
+}
+
 /**
  * Upload image bytes to the site's asset library using Webflow's two-step
  * (metadata -> S3 form POST) flow, and return the asset id + hosted URL.
+ * When `parentFolder` is given, the asset is filed into that Asset Manager
+ * folder instead of the panel's top level.
  */
-export async function uploadAsset(fileName: string, data: Buffer, mimeType: string): Promise<UploadedAsset> {
+export async function uploadAsset(
+  fileName: string,
+  data: Buffer,
+  mimeType: string,
+  parentFolder?: string | null
+): Promise<UploadedAsset> {
   const fileHash = crypto.createHash("md5").update(data).digest("hex");
 
   const meta = await wf<CreateAssetResponse>(`/sites/${SITE_ID}/assets`, {
     method: "POST",
-    body: JSON.stringify({ fileName, fileHash }),
+    body: JSON.stringify(parentFolder ? { fileName, fileHash, parentFolder } : { fileName, fileHash }),
   });
 
   const form = new FormData();

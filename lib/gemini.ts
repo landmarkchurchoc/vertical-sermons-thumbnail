@@ -157,6 +157,61 @@ async function topBottomDiff(data: Buffer): Promise<number> {
 // Below this top/bottom difference the image is almost certainly tiled.
 const MIN_TOP_BOTTOM_DIFF = 15;
 
+// --- Web optimization -------------------------------------------------------
+// Nano Banana returns a lossless PNG (often 2+ MB). That's far too heavy for a
+// web thumbnail, so we re-encode the final image to a compressed web format and
+// cap its dimensions, aiming for a small file (~500 KB or less). All knobs are
+// env-overridable so the format/size can be tuned without a code change.
+const OUTPUT_FORMAT = (process.env.OUTPUT_FORMAT || "webp").toLowerCase(); // webp | jpeg | avif
+const OUTPUT_MAX_WIDTH = Number(process.env.OUTPUT_MAX_WIDTH || 1000); // px; 2:3 -> ~1500 tall
+const TARGET_BYTES = Math.max(50, Number(process.env.OUTPUT_MAX_KB || 500)) * 1024;
+
+function formatMime(fmt: string): { fmt: "webp" | "jpeg" | "avif"; mimeType: string; ext: string } {
+  if (fmt === "jpg" || fmt === "jpeg") return { fmt: "jpeg", mimeType: "image/jpeg", ext: "jpg" };
+  if (fmt === "avif") return { fmt: "avif", mimeType: "image/avif", ext: "avif" };
+  return { fmt: "webp", mimeType: "image/webp", ext: "webp" };
+}
+
+async function encodeAt(data: Buffer, fmt: "webp" | "jpeg" | "avif", quality: number, width: number): Promise<Buffer> {
+  const pipe = sharp(data).resize({ width, withoutEnlargement: true });
+  if (fmt === "jpeg") return pipe.jpeg({ quality, mozjpeg: true }).toBuffer();
+  if (fmt === "avif") return pipe.avif({ quality }).toBuffer();
+  return pipe.webp({ quality }).toBuffer();
+}
+
+export interface OptimizedImage extends ImageData {
+  ext: string;
+  bytes: number;
+}
+
+/**
+ * Re-encode the generated image to a compressed web format (default WebP),
+ * resizing down to OUTPUT_MAX_WIDTH and stepping quality down until the result
+ * is at or under the target size. Falls back to the original bytes if sharp
+ * cannot process the image, so the pipeline never breaks on optimization.
+ */
+export async function optimizeForWeb(input: ImageData): Promise<OptimizedImage> {
+  const { fmt, mimeType, ext } = formatMime(OUTPUT_FORMAT);
+  try {
+    let out: Buffer | null = null;
+    // Try progressively lower quality until we're under the size target.
+    for (const q of [82, 74, 66, 58, 50]) {
+      out = await encodeAt(input.data, fmt, q, OUTPUT_MAX_WIDTH);
+      if (out.length <= TARGET_BYTES) break;
+    }
+    // Still too big at the lowest quality? Shrink the dimensions once more.
+    if (out && out.length > TARGET_BYTES) {
+      out = await encodeAt(input.data, fmt, 58, Math.round(OUTPUT_MAX_WIDTH * 0.8));
+    }
+    if (out) return { data: out, mimeType, ext, bytes: out.length };
+  } catch (err) {
+    console.warn("optimizeForWeb: falling back to original bytes:", err);
+  }
+  // Fallback: keep the original render but report a sensible extension.
+  const origExt = input.mimeType.includes("png") ? "png" : input.mimeType.includes("webp") ? "webp" : "jpg";
+  return { data: input.data, mimeType: input.mimeType, ext: origExt, bytes: input.data.length };
+}
+
 /**
  * Reposition to 2:3 and guard against the two common Nano Banana failures:
  * letterboxing (empty/black bottom) and tiling (the layout stacked twice).

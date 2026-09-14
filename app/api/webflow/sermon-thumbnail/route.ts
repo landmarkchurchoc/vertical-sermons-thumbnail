@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { repositionTo2x3Filled } from "@/lib/gemini";
+import { repositionTo2x3Filled, optimizeForWeb } from "@/lib/gemini";
 import {
   SERMONS_COLLECTION_ID,
   getSermon,
   horizontalThumbnailUrl,
   hasVerticalThumbnail,
+  ensureAssetFolder,
   uploadAsset,
   setVerticalThumbnail,
   publishItems,
@@ -84,17 +85,19 @@ async function processSermon(itemId: string, force = false) {
   // 2. Reposition to 2:3 with Nano Banana (retries if the bottom comes out empty).
   const generated = await repositionTo2x3Filled({ data: srcBuf, mimeType: srcMime });
 
-  // 3. Upload the generated image to the Webflow asset library.
-  const ext = generated.mimeType.includes("png")
-    ? "png"
-    : generated.mimeType.includes("webp")
-      ? "webp"
-      : "jpg";
+  // 3. Compress + convert to a lightweight web format (default WebP, ~500 KB).
+  const optimized = await optimizeForWeb(generated);
+
+  // 4. Upload the generated image to the Webflow asset library, corralled into a
+  //    dedicated folder so it doesn't clutter the top level of the Asset Manager.
+  //    (CMS image fields must reference a hosted asset, so the file has to live
+  //    in the library — the folder just keeps these auto-renders organized.)
+  const folderId = await ensureAssetFolder();
   // Webflow rejects long asset file names, so cap the slug-based base.
   const base = (item.fieldData.slug || itemId).slice(0, 60);
-  const asset = await uploadAsset(`${base}-vertical.${ext}`, generated.data, generated.mimeType);
+  const asset = await uploadAsset(`${base}-vertical.${optimized.ext}`, optimized.data, optimized.mimeType, folderId);
 
-  // 4. Write the field and publish.
+  // 5. Write the field and publish.
   const alt = item.fieldData.name ? `${item.fieldData.name} — vertical thumbnail` : null;
   await setVerticalThumbnail(itemId, asset, alt);
 
@@ -114,6 +117,9 @@ async function processSermon(itemId: string, force = false) {
     assetId: asset.id,
     assetUrl: asset.hostedUrl,
     published,
+    format: optimized.mimeType,
+    fileKB: Math.round(optimized.bytes / 1024),
+    folderId: folderId ?? null,
     attempts: generated.attempts,
     bottomBrightness: generated.bottomBrightness,
     topBottomDiff: generated.topBottomDiff,
