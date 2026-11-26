@@ -33,7 +33,10 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  let body: { triggerType?: string; payload?: { id?: string; collectionId?: string } };
+  let body: {
+    triggerType?: string;
+    payload?: { id?: string; collectionId?: string; fieldData?: Record<string, unknown> };
+  };
   try {
     body = await req.json();
   } catch {
@@ -52,13 +55,33 @@ export async function POST(req: NextRequest) {
   // overwrite earlier low-quality renders; not set by Webflow's own webhooks).
   const force = ["1", "true", "yes"].includes((req.nextUrl.searchParams.get("force") || "").toLowerCase());
 
+  // Fast path: the webhook payload already carries the item's fields. If it
+  // shows a vertical thumbnail is set, skip without any Webflow API call. This
+  // is what keeps bulk CMS edits (e.g. updating speaker names on sermons that
+  // already have thumbnails) from hammering the API — the common case costs
+  // zero requests — and it absorbs the "changed" event our own write fires.
+  const vt = body.payload?.fieldData?.["vertical-thumbnail"] as
+    | { url?: string; fileId?: string }
+    | null
+    | undefined;
+  if (!force && (vt?.url || vt?.fileId)) {
+    return NextResponse.json({ skipped: "vertical-thumbnail already set (from payload)", itemId });
+  }
+
   try {
     const result = await processSermon(itemId, force);
     return NextResponse.json(result);
   } catch (err) {
     console.error("sermon-thumbnail error:", err);
-    // 500 lets Webflow retry transient failures; the guard keeps retries safe.
-    return NextResponse.json({ error: String(err instanceof Error ? err.message : err) }, { status: 500 });
+    // Acknowledge with 200 even on failure. Returning 5xx makes Webflow retry
+    // the delivery, which during a rate-limit burst (e.g. bulk CMS edits) piles
+    // on more API calls and amplifies the storm. The Webflow helper already
+    // retries transient 429/5xx internally; anything that still fails here is
+    // left for the next "changed" event or a manual backfill to pick up.
+    return NextResponse.json(
+      { ok: false, deferred: true, error: String(err instanceof Error ? err.message : err) },
+      { status: 200 }
+    );
   }
 }
 

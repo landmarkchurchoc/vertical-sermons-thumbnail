@@ -28,23 +28,48 @@ function token(): string {
   return t;
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Webflow's Data API is rate limited per site/token (~60-120 req/min). A burst
+// of CMS edits (e.g. bulk-updating sermons) fires many webhooks at once and can
+// push us over the limit, returning 429 "Too Many Requests". Retry those (and
+// transient 5xx) with exponential backoff + jitter, honoring Retry-After, so a
+// burst spreads out and drains instead of erroring. Kept short so total time
+// stays well under the function's maxDuration.
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+const MAX_WF_RETRIES = 4;
+
 async function wf<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${API}${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${token()}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      ...(init.headers || {}),
-    },
-  });
-  if (!res.ok) {
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(`${API}${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${token()}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        ...(init.headers || {}),
+      },
+    });
+
+    if (res.ok) {
+      // Some endpoints (publish) may return an empty body.
+      const text = await res.text();
+      return (text ? JSON.parse(text) : {}) as T;
+    }
+
+    if (RETRYABLE_STATUS.has(res.status) && attempt < MAX_WF_RETRIES) {
+      const retryAfter = Number(res.headers.get("retry-after"));
+      const wait =
+        Number.isFinite(retryAfter) && retryAfter > 0
+          ? Math.min(retryAfter * 1000, 8000)
+          : Math.min(500 * 2 ** attempt, 4000) + Math.floor(Math.random() * 400);
+      await sleep(wait);
+      continue;
+    }
+
     const detail = await res.text().catch(() => "");
     throw new Error(`Webflow ${init.method || "GET"} ${path} -> ${res.status}: ${detail.slice(0, 500)}`);
   }
-  // Some endpoints (publish) may return an empty body.
-  const text = await res.text();
-  return (text ? JSON.parse(text) : {}) as T;
 }
 
 interface ImageFieldValue {
